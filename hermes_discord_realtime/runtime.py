@@ -1026,6 +1026,7 @@ async def _amain(args: argparse.Namespace | None = None) -> None:
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        force=True,
     )
     log = logging.getLogger("hermes.discord_realtime")
     log.info("Starting Discord Realtime voice bridge. Stop hermes-gateway first when reusing the same bot token.")
