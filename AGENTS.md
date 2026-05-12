@@ -17,12 +17,6 @@ Development rules:
 - Never commit `.env`, Discord tokens, OpenAI keys, Home Assistant tokens, or
   voice recordings.
 
-Known homelab test IDs:
-
-- guild: `1210302880897310820`
-- voice channel: `1503132822892707861`
-- allowed user: `691556762846887968`
-
 The current bridge reuses the existing Hermes Discord bot token, so
 `hermes-gateway` must be stopped while running it. A separate Discord bot token
 is the preferred next step for production.
