@@ -1,0 +1,10 @@
+name: hermes-discord-realtime
+version: 0.1.0
+description: "Duplex OpenAI Realtime voice interface for Hermes over Discord voice channels."
+author: AllenJvN
+kind: standalone
+platforms:
+  - linux
+requires_env:
+  - DISCORD_BOT_TOKEN
+  - OPENAI_REALTIME_API_KEY
