@@ -604,11 +604,22 @@ class RealtimeDiscordSandbox(discord.Client):
         assert self.user is not None
         self.log.info("Discord logged in as %s (%s)", self.user, self.user.id)
         guild = self.get_guild(self.args.guild_id)
-        if guild is None:
-            raise RuntimeError(f"Guild {self.args.guild_id} not found or bot is not a member")
-        channel = guild.get_channel(self.args.voice_channel_id)
+        channel = guild.get_channel(self.args.voice_channel_id) if guild else None
         if channel is None:
-            raise RuntimeError(f"Voice channel {self.args.voice_channel_id} not found in guild {guild.name}")
+            self.log.info(
+                "Voice channel not cached yet; fetching channel_id=%s directly",
+                self.args.voice_channel_id,
+            )
+            channel = await self.fetch_channel(self.args.voice_channel_id)
+            guild = getattr(channel, "guild", guild)
+        if guild is None:
+            raise RuntimeError(
+                f"Guild {self.args.guild_id} not found or bot is not a member"
+            )
+        if channel is None:
+            raise RuntimeError(
+                f"Voice channel {self.args.voice_channel_id} not found in guild {guild.name}"
+            )
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
             raise RuntimeError(f"Channel {channel} is not a voice/stage channel")
 
