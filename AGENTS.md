@@ -11,14 +11,14 @@ Development rules:
   truly cannot support the behavior.
 - Test against the homelab Hermes VM before pushing user-facing changes when
   possible.
-- If copying changes into `/home/allen/.hermes/plugins/hermes-discord-realtime`
-  or `/home/allen/.hermes/hermes-agent/experiments`, keep this GitHub repo in
-  sync afterward.
+- If copying changes into `/home/allen/.hermes/plugins/hermes-discord-realtime`,
+  keep this GitHub repo in sync afterward.
 - Never commit `.env`, Discord tokens, OpenAI keys, Home Assistant tokens, or
   voice recordings.
 
-Production v1 is a separate voice sidecar bot using
-`DISCORD_REALTIME_BOT_TOKEN`. The normal `hermes-gateway` should stay running
-with `DISCORD_BOT_TOKEN` for text, DMs, home channels, cron, and slash
-commands. Same-token mode is only for temporary lab testing and requires
-stopping `hermes-gateway`.
+Production v1 is one-bot gateway mode only. The plugin registers a
+`pre_gateway_dispatch` hook and `/realtime` commands; it reuses the existing
+Discord adapter/client inside `hermes-gateway` and must not start a second
+Discord client. Test by restarting `hermes-gateway`, then using
+`/realtime doctor`, `/realtime join`, and `/realtime leave` from Discord while
+confirming DMs/text still work.

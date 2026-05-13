@@ -1,112 +1,98 @@
 # Hermes Discord Realtime
 
-Duplex OpenAI Realtime voice for Hermes Agent in Discord voice channels.
+OpenAI Realtime duplex voice for the existing Hermes Discord bot.
 
-This plugin adds a Discord voice sidecar for Hermes. The normal
-`hermes-gateway` keeps handling text, DMs, home channels, cron delivery, slash
-commands, and platform events. The realtime sidecar joins a voice channel,
-streams audio to OpenAI Realtime, speaks back into Discord, supports barge-in,
-and delegates real work to Hermes through one compact tool:
+This plugin is intentionally a one-bot integration. The normal
+`hermes-gateway` process keeps ownership of Discord DMs, the home channel,
+slash commands, cron output, Home Assistant events, and voice. The plugin loads
+inside that gateway and adds `/realtime` commands that join the voice channel
+you are already in.
+
+Realtime gets one compact tool:
 
 ```text
 ask_hermes_agent(request)
 ```
 
+That keeps the voice model small and fast while Hermes remains responsible for
+real tools: Home Assistant, repos, terminals, device workers, memory, web, and
+other configured capabilities.
+
 ## Architecture
 
-Recommended production layout:
-
 ```text
+Discord
+  one Hermes bot token
+        |
 hermes-gateway.service
-  normal Hermes Discord/text gateway
-  uses DISCORD_BOT_TOKEN
-
-hermes-discord-realtime.service
-  voice-only Discord sidecar
-  uses DISCORD_REALTIME_BOT_TOKEN
-  calls Hermes via ask_hermes_agent
+  normal Hermes text + platform runtime
+        |
+hermes-discord-realtime plugin
+  /realtime join | leave | status | doctor
+        |
+OpenAI Realtime + ask_hermes_agent
 ```
 
-This avoids the Discord session conflict that happens when two processes log in
-with the same bot token. Same-token lab testing is still supported, but you must
-stop `hermes-gateway` while the voice bridge is running.
+Only `hermes-gateway` owns Discord; there is no extra process to keep alive.
 
 ## Requirements
 
-- Hermes Agent installed and working.
-- A Discord server where you can invite bots and edit channel permissions.
-- A normal Hermes Discord bot for text, if you use `hermes-gateway`.
-- A separate Discord bot for voice, recommended for production.
-- OpenAI Platform Realtime key in `OPENAI_REALTIME_API_KEY`.
+- Hermes Agent installed and already working with Discord.
+- `DISCORD_BOT_TOKEN` for the existing Hermes bot.
+- `DISCORD_ALLOWED_USERS` set to trusted Discord user IDs.
+- `OPENAI_REALTIME_API_KEY` set to an OpenAI Platform key with Realtime access.
 - `ffmpeg` available on the Hermes host.
-- Discord Developer Mode enabled so you can copy server/channel/user IDs.
+- Discord channel permissions for text replies and voice.
 
 ## Install
 
 ```bash
 hermes plugins install AllenJvN/hermes-discord-realtime --enable
+hermes gateway restart
 ```
 
-Check the command surface:
-
-```bash
-hermes discord-realtime setup
-hermes discord-realtime env
-```
-
-## Create The Voice Bot
-
-In the Discord Developer Portal:
-
-1. Create an application, for example `Hermes Voice`.
-2. Add a bot.
-3. Copy the bot token.
-4. Copy the application/client ID.
-5. Put them in `~/.hermes/.env`:
-
-```bash
-DISCORD_REALTIME_BOT_TOKEN=<voice_bot_token>
-DISCORD_REALTIME_CLIENT_ID=<voice_bot_client_id>
-```
-
-Print an invite URL:
-
-```bash
-hermes discord-realtime invite-url
-```
-
-Invite the voice bot to your server.
-
-Minimum permissions:
+If Discord's slash picker does not refresh immediately, type the command as
+plain text. The gateway hook handles both forms:
 
 ```text
-View Channels
-Connect
-Speak
-Use Voice Activity
-Send Messages
-Read Message History
+/realtime doctor
 ```
 
-## Configure IDs
+## Configure
 
-Enable Discord Developer Mode:
-
-```text
-User Settings -> Advanced -> Developer Mode
-```
-
-Copy IDs and add them to `~/.hermes/.env`:
+Add or confirm these values in `~/.hermes/.env`:
 
 ```bash
-DISCORD_REALTIME_GUILD_ID=<server_id>
-DISCORD_REALTIME_VOICE_CHANNEL_ID=<voice_channel_id>
-DISCORD_REALTIME_ALLOWED_USERS=<your_discord_user_id>
+DISCORD_BOT_TOKEN=<existing_hermes_bot_token>
+DISCORD_ALLOWED_USERS=<your_discord_user_id>
+DISCORD_HOME_CHANNEL=<hermes_home_text_channel_id>
 OPENAI_REALTIME_API_KEY=<openai_platform_key>
 HERMES_REALTIME_AGENT_TOOLSETS=all
 ```
 
-If the voice channel is private, explicitly allow the voice bot or its role:
+Optional tuning:
+
+```bash
+OPENAI_REALTIME_MODEL=gpt-realtime
+OPENAI_REALTIME_VOICE=alloy
+OPENAI_REALTIME_VAD_RMS_THRESHOLD=650
+OPENAI_REALTIME_VAD_SILENCE_SECONDS=0.75
+HERMES_REALTIME_AGENT_TIMEOUT=180
+```
+
+## Discord Permissions
+
+For the text channel where you run `/realtime`, allow the Hermes bot or its
+role:
+
+```text
+View Channel
+Send Messages
+Read Message History
+Use Application Commands
+```
+
+For the voice channel, allow:
 
 ```text
 View Channel
@@ -115,83 +101,35 @@ Speak
 Use Voice Activity
 ```
 
-## Validate
+Private channels usually need explicit channel-level allows even when the bot
+was invited with the right global permissions.
 
-Run the doctor before starting the service:
+## Use
 
-```bash
-hermes discord-realtime doctor
+Join a Discord voice channel yourself, then run this in a text channel where
+Hermes can read and reply:
+
+```text
+/realtime doctor
+/realtime join
 ```
 
-The doctor checks:
+Speak naturally. Hermes should answer in voice, and you can interrupt while it
+is talking.
 
-- required env vars
-- `ffmpeg`
-- Python voice dependencies
-- bot membership in the Discord server
-- voice channel permissions
-- allowed user configuration
+Disconnect cleanly:
 
-Fix every `[fail]` before continuing. `[warn]` items are usually safe but worth
-reading.
-
-## Run As A Service
-
-Install and start the sidecar:
-
-```bash
-hermes discord-realtime install-service
-hermes discord-realtime start
+```text
+/realtime leave
 ```
 
-Inspect:
+Other commands:
 
-```bash
-hermes discord-realtime status
-hermes discord-realtime logs
+```text
+/realtime status
+/rt join
+/rt leave
 ```
-
-Stop cleanly:
-
-```bash
-hermes discord-realtime stop
-```
-
-This is the preferred way to make the bot leave voice. Do not kick it unless
-you are intentionally testing Discord permission recovery.
-
-## Manual Run
-
-For foreground testing:
-
-```bash
-hermes discord-realtime run
-```
-
-You can also override config:
-
-```bash
-hermes discord-realtime run \
-  --guild-id 123456789012345678 \
-  --voice-channel-id 234567890123456789 \
-  --allowed-user-id 345678901234567890
-```
-
-Same-token lab mode:
-
-```bash
-systemctl --user stop hermes-gateway
-
-hermes discord-realtime run \
-  --guild-id <server_id> \
-  --voice-channel-id <voice_channel_id> \
-  --allowed-user-id <your_discord_user_id> \
-  --discord-bot-token "$DISCORD_BOT_TOKEN"
-
-systemctl --user start hermes-gateway
-```
-
-Do not use same-token mode for normal operation.
 
 ## Test Prompts
 
@@ -201,31 +139,25 @@ Basic duplex:
 Hermes, tell me a long story about a fox and keep going until I stop you.
 ```
 
-Interrupt while Hermes is speaking:
+Barge-in:
 
 ```text
 Stop. Summarize it in one sentence.
 ```
 
-Tool calling through Hermes:
+Hermes tool calling:
 
 ```text
 Hermes, turn on the living room light.
 ```
 
-The Realtime model should call `ask_hermes_agent`, Hermes should use its normal
-tools, and the voice bot should speak the result.
+The Realtime model should call `ask_hermes_agent`, Hermes should run the normal
+agent/tool flow, and the same Discord bot should continue responding to text
+DMs or `hermes-home`.
 
-## Tool Calling Model
+## Toolsets
 
-OpenAI Realtime gets exactly one tool:
-
-```text
-ask_hermes_agent(request)
-```
-
-The plugin runs a normal Hermes agent turn with configurable toolsets. The
-default is:
+By default, the voice bridge allows Hermes to use all configured toolsets:
 
 ```bash
 HERMES_REALTIME_AGENT_TOOLSETS=all
@@ -237,45 +169,20 @@ For a tighter setup:
 HERMES_REALTIME_AGENT_TOOLSETS=homeassistant,device_worker,device_coding
 ```
 
-This keeps the Realtime context small and lets Hermes remain the owner of real
-tools, safety behavior, memory, repos, terminals, Home Assistant, and device
-workers.
-
-## Security Model
-
-- Voice access is powerful because it can call the normal Hermes agent.
-- Restrict `DISCORD_REALTIME_ALLOWED_USERS` to trusted users.
-- Prefer a separate voice bot token.
-- Keep both Discord bots private to your server.
-- Do not expose any local worker ports publicly.
-- Built-in checks are guardrails, not a sandbox.
+Realtime still sees only `ask_hermes_agent`; this setting controls what the
+Hermes agent may use behind that bridge.
 
 ## Troubleshooting
 
-- `403 Missing Access`: the bot is not in the server, cannot view the channel,
-  or lacks channel-specific permissions.
-- Bot joins voice but text Hermes is silent: make sure `hermes-gateway` is
-  running and the text bot can see/send/read in the configured home channel.
-- Normal Hermes stops responding during voice: you are probably using same-token
-  mode; switch to `DISCORD_REALTIME_BOT_TOKEN`.
-- You speak but nothing happens: confirm your Discord user ID is in
-  `DISCORD_REALTIME_ALLOWED_USERS`.
-- `invalid_api_key`: use an OpenAI Platform key in `OPENAI_REALTIME_API_KEY`.
-- No audio: confirm `ffmpeg` and PyNaCl are installed in the Hermes environment.
+- `/realtime` is unknown: restart `hermes-gateway`; if the slash picker is stale, type `/realtime doctor` as plain text.
+- `OPENAI_REALTIME_API_KEY is not set`: add an OpenAI Platform key to `~/.hermes/.env` and restart the gateway.
+- `Join a Discord voice channel first`: your Discord user must be in a voice channel before `/realtime join`.
+- `403 Missing Access`: fix channel-level permissions for the bot role.
+- Hermes voice works but text does not: confirm `hermes-gateway` is active and the bot can view/send/read in `DISCORD_HOME_CHANNEL`.
+- You speak but nothing happens: confirm your Discord user ID is in `DISCORD_ALLOWED_USERS`.
+- The bot stays in voice: run `/realtime leave`; kicking the bot from Discord disconnects the socket but does not give the plugin a clean shutdown signal.
 
-## Commands
+## Development
 
-```bash
-hermes discord-realtime setup
-hermes discord-realtime env
-hermes discord-realtime invite-url
-hermes discord-realtime doctor
-hermes discord-realtime run
-hermes discord-realtime install-service
-hermes discord-realtime start
-hermes discord-realtime stop
-hermes discord-realtime restart
-hermes discord-realtime status
-hermes discord-realtime logs
-hermes discord-realtime uninstall-service
-```
+See `AGENTS.md` for maintainer notes, homelab test workflow, and repo sync
+expectations.
