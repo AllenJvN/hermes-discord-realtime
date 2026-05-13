@@ -18,6 +18,10 @@ terminals, device workers, memory, web, and any other configured tools.
 Voice tool calls acknowledge immediately and run Hermes in the background.
 Action commands stay silent on success; questions, status checks, searches, and
 other information requests speak the result when it is ready.
+While Hermes is working, the plugin posts a compact progress card to the
+Discord voice channel chat and edits it as the job progresses. If voice-channel
+chat is unavailable, it falls back to the text channel where `/realtime join`
+was run.
 
 ## Install
 
@@ -140,7 +144,13 @@ HERMES_REALTIME_AGENT_TIMEOUT=180
 HERMES_REALTIME_AGENT_TOOLSETS=homeassistant,device_worker,device_coding
 HERMES_REALTIME_BACKGROUND_WORKERS=2
 HERMES_REALTIME_MAX_ACTIVE_JOBS=4
+HERMES_REALTIME_PROGRESS_TEXT=true
+HERMES_REALTIME_PROGRESS_HEARTBEAT_SECONDS=30
 ```
+
+Progress text follows Hermes' Discord `display.tool_progress` setting by
+default. Set `HERMES_REALTIME_PROGRESS_TEXT=false` to disable voice progress
+cards without changing normal text-bot progress.
 
 ## Troubleshooting
 
@@ -148,6 +158,7 @@ HERMES_REALTIME_MAX_ACTIVE_JOBS=4
 - `Set OPENAI_REALTIME_API_KEY or a valid OpenAI Platform OPENAI_API_KEY`: add one of those keys to `~/.hermes/.env` and restart the gateway.
 - `Join a Discord voice channel first`: join voice before running `/realtime join`.
 - `403 Missing Access`: fix text or voice channel permissions for the bot role.
+- No progress card appears: make sure the bot can send messages in the voice channel chat, or in the text channel where `/realtime join` was run.
 - You speak but nothing happens: confirm your Discord user ID is in `DISCORD_ALLOWED_USERS`.
 - Hermes voice works but text does not: confirm `hermes-gateway` is active and the bot can read/send in `DISCORD_HOME_CHANNEL`.
 - The bot stays in voice: run `/realtime leave`; kicking the bot disconnects Discord but bypasses the plugin's clean shutdown path.

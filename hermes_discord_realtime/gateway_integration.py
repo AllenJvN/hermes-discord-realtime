@@ -273,12 +273,26 @@ def _gateway_realtime_args() -> argparse.Namespace:
         instructions=os.getenv("OPENAI_REALTIME_INSTRUCTIONS", DEFAULT_INSTRUCTIONS),
         agent_toolsets=os.getenv("HERMES_REALTIME_AGENT_TOOLSETS", "all"),
         agent_timeout=float(os.getenv("HERMES_REALTIME_AGENT_TIMEOUT", "180")),
+        progress_text_enabled=_progress_text_enabled(),
         vad_rms_threshold=int(os.getenv("OPENAI_REALTIME_VAD_RMS_THRESHOLD", "650")),
         vad_silence_seconds=float(os.getenv("OPENAI_REALTIME_VAD_SILENCE_SECONDS", "0.75")),
         vad_trailing_seconds=float(os.getenv("OPENAI_REALTIME_VAD_TRAILING_SECONDS", "0.25")),
         vad_min_seconds=float(os.getenv("OPENAI_REALTIME_VAD_MIN_SECONDS", "0.25")),
         volume=float(os.getenv("OPENAI_REALTIME_VOLUME", "1.0")),
     )
+
+
+def _progress_text_enabled() -> bool:
+    raw = os.getenv("HERMES_REALTIME_PROGRESS_TEXT", "").strip().lower()
+    if raw:
+        return raw not in {"0", "false", "no", "off"}
+    try:
+        from gateway.display_config import resolve_display_setting
+        from hermes_cli.config import load_config
+
+        return str(resolve_display_setting(load_config(), "discord", "tool_progress", "all")).lower() != "off"
+    except Exception:
+        return True
 
 
 class GatewayRealtimeSession:
@@ -305,6 +319,7 @@ class GatewayRealtimeSession:
         self.output_source: Optional[StreamingPCMAudioSource] = None
         self.receiver: Optional[LiveVoiceReceiver] = None
         self.duplex: Optional[RealtimeDuplexSession] = None
+        self.progress_reporter: Optional[RealtimeProgressReporter] = None
         self.keepalive_task: Optional[asyncio.Task] = None
         self.vad_task: Optional[asyncio.Task] = None
         self.stop_event = asyncio.Event()
@@ -323,6 +338,13 @@ class GatewayRealtimeSession:
         self.voice_client = await self.voice_channel.connect()
         self.adapter._voice_clients[self.guild_id] = self.voice_client
         self.output_source = StreamingPCMAudioSource(log)
+        if self.args.progress_text_enabled:
+            self.progress_reporter = RealtimeProgressReporter(
+                adapter=self.adapter,
+                primary_chat_id=str(self.channel_id),
+                fallback_chat_id=str(self.text_channel_id),
+                logger=log,
+            )
         self.duplex = RealtimeDuplexSession(
             api_key=self.args.openai_api_key,
             model=self.args.model,
@@ -332,6 +354,7 @@ class GatewayRealtimeSession:
             agent_toolsets=self.args.agent_toolsets,
             agent_timeout=self.args.agent_timeout,
             logger=log,
+            progress_callback=self.progress_reporter.from_thread if self.progress_reporter else None,
         )
         await asyncio.to_thread(self.duplex.connect)
         self.voice_client.play(self.output_source)
@@ -357,6 +380,9 @@ class GatewayRealtimeSession:
         if self.duplex:
             await asyncio.to_thread(self.duplex.close)
             self.duplex = None
+        if self.progress_reporter:
+            await self.progress_reporter.close()
+            self.progress_reporter = None
         if self.output_source:
             self.output_source.stop()
             self.output_source = None
@@ -439,3 +465,181 @@ class GatewayRealtimeSession:
         except Exception:
             log.exception("Gateway realtime VAD loop crashed")
             await self.close()
+
+
+class RealtimeProgressReporter:
+    """Small Discord progress card for background realtime voice jobs."""
+
+    def __init__(
+        self,
+        *,
+        adapter,
+        primary_chat_id: str,
+        fallback_chat_id: str,
+        logger: logging.Logger,
+    ) -> None:
+        self.adapter = adapter
+        self.primary_chat_id = primary_chat_id
+        self.fallback_chat_id = fallback_chat_id
+        self.log = logger
+        self.loop = asyncio.get_running_loop()
+        self._closed = False
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    def from_thread(self, event: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        try:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._handle_event(event))
+            )
+        except RuntimeError:
+            self.log.debug("Realtime progress event dropped; event loop is closed")
+
+    async def close(self) -> None:
+        self._closed = True
+
+    async def _handle_event(self, event: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        job_id = str(event.get("job_id") or "").strip()
+        if not job_id:
+            return
+
+        async with self._lock:
+            state = self._jobs.setdefault(
+                job_id,
+                {
+                    "message_id": None,
+                    "chat_id": None,
+                    "can_edit": True,
+                    "request": _safe_progress_text(str(event.get("request") or ""), limit=160),
+                    "status": "Delegated to Hermes agent.",
+                    "response_policy": str(event.get("response_policy") or ""),
+                },
+            )
+            if event.get("request"):
+                state["request"] = _safe_progress_text(str(event.get("request")), limit=160)
+            if event.get("response_policy"):
+                state["response_policy"] = str(event.get("response_policy"))
+
+            kind = str(event.get("event") or "")
+            if kind == "started":
+                state["status"] = "Delegated to Hermes agent."
+            elif kind == "still_working":
+                elapsed = int(event.get("elapsed_seconds") or 0)
+                state["status"] = f"Still working... {elapsed}s elapsed."
+            elif kind == "finished":
+                state["status"] = self._finished_status(state)
+            elif kind == "failed":
+                state["status"] = f"Failed: {_safe_progress_text(_result_summary(event.get('result')), limit=220)}"
+            else:
+                return
+
+            state["event"] = kind
+            await self._publish(job_id, state)
+
+    async def _publish(self, job_id: str, state: dict[str, Any]) -> None:
+        content = self._render(job_id, state)
+        chat_id = str(state.get("chat_id") or self.primary_chat_id)
+        message_id = state.get("message_id")
+
+        if message_id and state.get("can_edit"):
+            try:
+                result = await self.adapter.edit_message(
+                    chat_id=chat_id,
+                    message_id=str(message_id),
+                    content=content,
+                )
+                if getattr(result, "success", False):
+                    await self._send_typing(chat_id)
+                    return
+                state["can_edit"] = False
+            except Exception:
+                state["can_edit"] = False
+                self.log.debug("Realtime progress edit failed", exc_info=True)
+
+        if message_id and not state.get("can_edit") and state.get("event") == "still_working":
+            return
+
+        result = await self._send_with_fallback(content)
+        if getattr(result, "success", False):
+            state["message_id"] = getattr(result, "message_id", None)
+            state["chat_id"] = getattr(result, "raw_response", {}).get("chat_id") or self.primary_chat_id
+            await self._send_typing(str(state["chat_id"]))
+
+    async def _send_with_fallback(self, content: str):
+        result = None
+        try:
+            result = await self.adapter.send(self.primary_chat_id, content)
+            if getattr(result, "success", False):
+                raw = getattr(result, "raw_response", None) or {}
+                raw["chat_id"] = self.primary_chat_id
+                result.raw_response = raw
+                return result
+            self.log.debug("Realtime progress primary send failed: %s", getattr(result, "error", "unknown"))
+        except Exception:
+            self.log.debug("Realtime progress primary send crashed", exc_info=True)
+
+        if self.fallback_chat_id == self.primary_chat_id:
+            return result
+
+        try:
+            result = await self.adapter.send(self.fallback_chat_id, content)
+            if getattr(result, "success", False):
+                raw = getattr(result, "raw_response", None) or {}
+                raw["chat_id"] = self.fallback_chat_id
+                result.raw_response = raw
+            return result
+        except Exception:
+            self.log.debug("Realtime progress fallback send crashed", exc_info=True)
+            return None
+
+    async def _send_typing(self, chat_id: str) -> None:
+        try:
+            if hasattr(self.adapter, "send_typing"):
+                await self.adapter.send_typing(chat_id)
+        except Exception:
+            self.log.debug("Realtime progress typing indicator failed", exc_info=True)
+
+    def _render(self, job_id: str, state: dict[str, Any]) -> str:
+        emoji = _tool_emoji("delegate_task", default=">")
+        request = state.get("request") or "voice request"
+        status = state.get("status") or "Working."
+        return (
+            f"{emoji} **Hermes voice job `{job_id}`**\n"
+            f"Working on: {request}\n"
+            f"Status: {status}"
+        )
+
+    def _finished_status(self, state: dict[str, Any]) -> str:
+        if state.get("response_policy") == "speak_result":
+            return "Finished. I'll speak the result."
+        return "Finished."
+
+
+def _safe_progress_text(value: str, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    text = text.replace("@", "(at)")
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text or "voice request"
+
+
+def _result_summary(result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("error", "response", "stderr", "stdout"):
+            value = str(result.get(key) or "").strip()
+            if value:
+                return value
+    return str(result or "Hermes could not complete the request.")
+
+
+def _tool_emoji(tool_name: str, *, default: str) -> str:
+    try:
+        from agent.display import get_tool_emoji
+
+        return get_tool_emoji(tool_name, default=default)
+    except Exception:
+        return default

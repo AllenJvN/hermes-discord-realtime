@@ -18,7 +18,7 @@ import time
 import uuid
 from array import array
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import discord
 
@@ -109,6 +109,7 @@ class RealtimeDuplexSession:
         agent_toolsets: str,
         agent_timeout: float,
         logger: logging.Logger,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -118,6 +119,7 @@ class RealtimeDuplexSession:
         self.agent_toolsets = agent_toolsets
         self.agent_timeout = agent_timeout
         self.log = logger
+        self.progress_callback = progress_callback
         self._ws: Any = None
         self._send_lock = threading.Lock()
         self._closed = threading.Event()
@@ -133,6 +135,12 @@ class RealtimeDuplexSession:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._max_active_jobs = _env_int("HERMES_REALTIME_MAX_ACTIVE_JOBS", default=4, minimum=1, maximum=32)
         self._max_retained_jobs = _env_int("HERMES_REALTIME_MAX_RETAINED_JOBS", default=20, minimum=1, maximum=200)
+        self._progress_heartbeat_seconds = _env_int(
+            "HERMES_REALTIME_PROGRESS_HEARTBEAT_SECONDS",
+            default=30,
+            minimum=10,
+            maximum=300,
+        )
 
     def connect(self) -> None:
         from websockets.sync.client import connect
@@ -305,7 +313,7 @@ class RealtimeDuplexSession:
             self._jobs[job_id] = {
                 "id": job_id,
                 "request": request,
-                "status": "queued",
+                "status": "running",
                 "created_at": time.monotonic(),
                 "ack_sent": False,
                 "response_policy": response_policy,
@@ -326,6 +334,13 @@ class RealtimeDuplexSession:
             response_policy,
             request[:200],
         )
+        self._emit_progress(
+            "started",
+            job_id=job_id,
+            request=request,
+            response_policy=response_policy,
+        )
+        self._start_progress_heartbeat(job_id)
         future.add_done_callback(
             lambda completed: threading.Thread(
                 target=self._finish_background_job,
@@ -363,6 +378,12 @@ class RealtimeDuplexSession:
             job_id,
             result.get("ok"),
             response_policy,
+        )
+        self._emit_progress(
+            "finished" if result.get("ok") else "failed",
+            job_id=job_id,
+            response_policy=response_policy,
+            result=_clip_result(result),
         )
         if self._closed.is_set() or not self._connected:
             return
@@ -446,6 +467,41 @@ class RealtimeDuplexSession:
         remove_count = max(0, len(self._jobs) - self._max_retained_jobs)
         for _, job_id in completed[:remove_count]:
             self._jobs.pop(job_id, None)
+
+    def _start_progress_heartbeat(self, job_id: str) -> None:
+        if not self.progress_callback:
+            return
+
+        def _run() -> None:
+            while not self._closed.wait(self._progress_heartbeat_seconds):
+                with self._jobs_lock:
+                    job = self._jobs.get(job_id)
+                    if not job or job.get("status") not in {"queued", "running"}:
+                        return
+                    elapsed = max(0, int(time.monotonic() - float(job.get("created_at") or time.monotonic())))
+                    request = str(job.get("request") or "")
+                    response_policy = str(job.get("response_policy") or "")
+                self._emit_progress(
+                    "still_working",
+                    job_id=job_id,
+                    request=request,
+                    response_policy=response_policy,
+                    elapsed_seconds=elapsed,
+                )
+
+        threading.Thread(
+            target=_run,
+            name=f"hermes-realtime-job-progress-{job_id}",
+            daemon=True,
+        ).start()
+
+    def _emit_progress(self, event: str, **payload: Any) -> None:
+        if not self.progress_callback:
+            return
+        try:
+            self.progress_callback({"event": event, **payload})
+        except Exception as exc:
+            self.log.debug("Realtime progress callback failed: %s", exc)
 
     def _send(self, payload: dict[str, Any]) -> None:
         assert self._ws is not None
