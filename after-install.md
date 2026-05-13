@@ -30,8 +30,8 @@ In Discord, join a voice channel and run:
 
 Voice tool calls acknowledge immediately and run Hermes in the background.
 Action commands stay silent on success; questions, status checks, searches, and
-other information requests speak the result when ready. Home Assistant actions
-skip post-action state checks unless you explicitly ask for status.
+other information requests speak the result when ready. Action requests avoid
+extra verification unless you explicitly ask for status.
 
 During longer tool calls, Hermes posts a compact progress card in the Discord
 voice channel chat and edits it as work continues. Set

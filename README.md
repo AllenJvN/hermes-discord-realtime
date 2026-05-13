@@ -3,7 +3,7 @@
 OpenAI Realtime duplex voice for the existing Hermes Discord bot.
 
 This is a one-bot Hermes gateway plugin. `hermes-gateway` keeps ownership of
-Discord text, DMs, home-channel messages, cron output, Home Assistant events,
+Discord text, DMs, home-channel messages, cron output, configured integrations,
 and the Discord connection itself. This plugin adds `/realtime` commands that
 join the voice channel you are already in.
 
@@ -13,8 +13,8 @@ Realtime exposes one bridge tool to the voice model:
 ask_hermes_agent(request, response_policy)
 ```
 
-Hermes remains responsible for the actual work: Home Assistant, repos,
-terminals, device workers, memory, web, and any other configured tools.
+Hermes remains responsible for the actual work: repos, terminals, device
+workers, memory, web, and any other configured tools.
 Voice tool calls acknowledge immediately and run Hermes in the background.
 Action commands stay silent on success; questions, status checks, searches, and
 other information requests speak the result when it is ready.
@@ -120,13 +120,13 @@ Stop. Summarize it in one sentence.
 Hermes tool calling:
 
 ```text
-Hermes, turn on the living room light.
+Hermes, list the current jobs or active tasks.
 ```
 
-For voice-mode Home Assistant actions, Hermes attempts the action without a
-post-action state check unless you explicitly ask it to check or verify status.
-If you ask for status, state, running jobs, search results, or any other answer,
-Hermes speaks the result after the background task completes.
+For voice-mode action requests, Hermes attempts the action and avoids extra
+verification unless you explicitly ask it to check, verify, or report status. If
+you ask for status, running jobs, search results, or any other answer, Hermes
+speaks the result after the background task completes.
 
 The same Discord bot should keep responding to DMs or `hermes-home` while voice
 is active.
@@ -141,7 +141,7 @@ OPENAI_REALTIME_VOICE=alloy
 OPENAI_REALTIME_VAD_RMS_THRESHOLD=650
 OPENAI_REALTIME_VAD_SILENCE_SECONDS=0.75
 HERMES_REALTIME_AGENT_TIMEOUT=180
-HERMES_REALTIME_AGENT_TOOLSETS=homeassistant,device_worker,device_coding
+HERMES_REALTIME_AGENT_TOOLSETS=device_worker,device_coding
 HERMES_REALTIME_BACKGROUND_WORKERS=2
 HERMES_REALTIME_MAX_ACTIVE_JOBS=4
 HERMES_REALTIME_PROGRESS_TEXT=true
