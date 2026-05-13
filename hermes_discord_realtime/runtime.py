@@ -27,16 +27,14 @@ from gateway.platforms.discord import VoiceReceiver
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_INSTRUCTIONS = (
     "You are Hermes speaking in a Discord voice channel through OpenAI Realtime. "
-    "Keep normal conversation short and natural. "
-    "When the user asks you to do anything that requires Hermes capabilities "
-    "(Home Assistant, git, terminals, repos, device workers, web, memory, etc.), "
-    "call ask_hermes_agent with the user's request. Use response_policy='ack_only' "
-    "for actions where success can stay silent, like turning on a light. Use "
-    "response_policy='speak_result' for questions, status checks, web searches, "
-    "lists, summaries, or anything where the user needs the result spoken back. "
-    "The tool starts background work; after it returns, briefly acknowledge that "
-    "you are trying the request. Do not claim success unless a later message "
-    "explicitly says it succeeded."
+    "Keep conversation short and natural. For Home Assistant, git, terminals, "
+    "repos, device workers, web, memory, or other Hermes capabilities, call "
+    "ask_hermes_agent. Use response_policy='ack_only' for actions that only need "
+    "an acknowledgement, like turning on a light. Use response_policy='speak_result' "
+    "for questions, status checks, searches, lists, summaries, or anything where "
+    "the user needs the result spoken back. After the tool returns, briefly "
+    "acknowledge that Hermes is working; do not claim success until a later "
+    "message explicitly says it succeeded."
 )
 
 ACK_RESPONSE_INSTRUCTIONS = (
@@ -164,10 +162,9 @@ class RealtimeDuplexSession:
                             "type": "function",
                             "name": "ask_hermes_agent",
                             "description": (
-                                "Delegate a request to the normal Hermes agent with its configured tools. "
-                                "Use for Home Assistant, git/repos, terminals, device workers, web, memory, "
-                                "or any real-world action. Choose ack_only for fire-and-forget actions, and "
-                                "speak_result when the user asked a question or needs information returned."
+                                "Delegate to the normal Hermes agent. Choose ack_only for actions that can "
+                                "stay silent on success, and speak_result for questions, searches, status, "
+                                "lists, summaries, or any information the user needs spoken back."
                             ),
                             "parameters": {
                                 "type": "object",
@@ -180,9 +177,8 @@ class RealtimeDuplexSession:
                                         "type": "string",
                                         "enum": ["ack_only", "speak_result"],
                                         "description": (
-                                            "Use ack_only for commands/actions that only need an immediate acknowledgement. "
-                                            "Use speak_result for questions, status checks, web searches, lists, summaries, "
-                                            "or anything where the user needs the result spoken back."
+                                            "ack_only for action commands; speak_result for questions, status, "
+                                            "searches, lists, summaries, or other returned information."
                                         ),
                                     },
                                 },
@@ -512,7 +508,11 @@ class RealtimeDuplexSession:
                     arguments=str(frame.get("arguments") or "{}"),
                 )
             elif ftype == "error":
-                self.log.error("Realtime error: %s", frame.get("error") or frame)
+                error = frame.get("error") or frame
+                if isinstance(error, dict) and error.get("code") == "response_cancel_not_active":
+                    self.log.info("Realtime cancel ignored: no active response")
+                else:
+                    self.log.error("Realtime error: %s", error)
             elif ftype in {"session.created", "session.updated", "input_audio_buffer.committed"}:
                 self.log.debug("Realtime event: %s", ftype)
 
