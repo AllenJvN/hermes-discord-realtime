@@ -15,6 +15,9 @@ ask_hermes_agent(request)
 
 Hermes remains responsible for the actual work: Home Assistant, repos,
 terminals, device workers, memory, web, and any other configured tools.
+Voice tool calls acknowledge immediately and run Hermes in the background.
+Action commands stay silent on success; questions, status checks, searches, and
+other information requests speak the result when it is ready.
 
 ## Install
 
@@ -108,6 +111,11 @@ Hermes tool calling:
 Hermes, turn on the living room light.
 ```
 
+For voice-mode Home Assistant actions, Hermes attempts the action without a
+post-action state check unless you explicitly ask it to check or verify status.
+If you ask for status, state, running jobs, search results, or any other answer,
+Hermes speaks the result after the background task completes.
+
 The same Discord bot should keep responding to DMs or `hermes-home` while voice
 is active.
 
@@ -122,6 +130,8 @@ OPENAI_REALTIME_VAD_RMS_THRESHOLD=650
 OPENAI_REALTIME_VAD_SILENCE_SECONDS=0.75
 HERMES_REALTIME_AGENT_TIMEOUT=180
 HERMES_REALTIME_AGENT_TOOLSETS=homeassistant,device_worker,device_coding
+HERMES_REALTIME_BACKGROUND_WORKERS=2
+HERMES_REALTIME_MAX_ACTIVE_JOBS=4
 ```
 
 ## Troubleshooting

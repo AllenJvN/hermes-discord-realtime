@@ -25,6 +25,11 @@ In Discord, join a voice channel and run:
 /realtime join
 ```
 
+Voice tool calls acknowledge immediately and run Hermes in the background.
+Action commands stay silent on success; questions, status checks, searches, and
+other information requests speak the result when ready. Home Assistant actions
+skip post-action state checks unless you explicitly ask for status.
+
 To make Hermes leave voice cleanly:
 
 ```text
