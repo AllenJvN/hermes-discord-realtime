@@ -7,10 +7,10 @@ Discord text, DMs, home-channel messages, cron output, Home Assistant events,
 and the Discord connection itself. This plugin adds `/realtime` commands that
 join the voice channel you are already in.
 
-Realtime sees one tool:
+Realtime exposes one bridge tool to the voice model:
 
 ```text
-ask_hermes_agent(request)
+ask_hermes_agent(request, response_policy)
 ```
 
 Hermes remains responsible for the actual work: Home Assistant, repos,
@@ -21,24 +21,32 @@ other information requests speak the result when it is ready.
 
 ## Install
 
+Prerequisites:
+
+- Hermes Agent is installed and `hermes-gateway` already works with Discord.
+- The same Discord bot has text and voice permissions in your server.
+- `~/.hermes/.env` has either `OPENAI_REALTIME_API_KEY` or a valid OpenAI
+  Platform `OPENAI_API_KEY`.
+
 ```bash
 hermes plugins install AllenJvN/hermes-discord-realtime --enable
 hermes gateway restart
 ```
 
-Required `~/.hermes/.env` values:
+Typical `~/.hermes/.env` values:
 
 ```bash
 DISCORD_BOT_TOKEN=<existing_hermes_bot_token>
 DISCORD_ALLOWED_USERS=<your_discord_user_id>
 DISCORD_HOME_CHANNEL=<hermes_home_text_channel_id>
+OPENAI_REALTIME_API_KEY=<openai_platform_api_key>
 HERMES_REALTIME_AGENT_TOOLSETS=all
 ```
 
-For OpenAI Realtime, the plugin uses `OPENAI_REALTIME_API_KEY` when set. If it
-is not set, it reuses `OPENAI_API_KEY` when that value looks like an OpenAI
-Platform key. Hermes `openai-codex` OAuth login is not enough by itself because
-Realtime uses OpenAI Platform API authentication.
+The plugin uses `OPENAI_REALTIME_API_KEY` first. If it is not set, it reuses
+`OPENAI_API_KEY` when that value looks like an OpenAI Platform key. Hermes
+`openai-codex` OAuth login is not enough by itself because Realtime uses
+OpenAI Platform API authentication.
 
 If Discord's slash picker is stale after install, type `/realtime doctor` as a
 normal text message. The gateway hook handles both native slash commands and
@@ -146,4 +154,4 @@ HERMES_REALTIME_MAX_ACTIVE_JOBS=4
 
 ## Development
 
-See `AGENTS.md` for maintainer notes and homelab test workflow.
+See `AGENTS.md` for maintainer notes.
