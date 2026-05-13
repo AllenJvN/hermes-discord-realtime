@@ -1,45 +1,33 @@
 # Hermes Discord Realtime Installed
 
-Run:
+Recommended production flow:
 
 ```bash
+hermes discord-realtime setup
 hermes discord-realtime env
+hermes discord-realtime invite-url
+hermes discord-realtime doctor
+hermes discord-realtime install-service
+hermes discord-realtime start
 ```
 
-Enable Discord Developer Mode and copy:
+Use a separate voice bot token in `DISCORD_REALTIME_BOT_TOKEN` so the normal
+`hermes-gateway` keeps handling DMs, `hermes-home`, cron, and slash commands.
 
-- server ID
-- voice channel ID
-- your Discord user ID
-
-Join your target Discord voice channel yourself first. If you are reusing the
-same Discord bot token as the normal Hermes gateway, stop the gateway and start
-the bridge:
+Required `~/.hermes/.env` values:
 
 ```bash
-systemctl --user stop hermes-gateway
-
-hermes discord-realtime run \
-  --guild-id <guild_id> \
-  --voice-channel-id <voice_channel_id> \
-  --allowed-user-id <discord_user_id>
+DISCORD_REALTIME_BOT_TOKEN=<voice_bot_token>
+DISCORD_REALTIME_CLIENT_ID=<voice_bot_client_id>
+DISCORD_REALTIME_GUILD_ID=<server_id>
+DISCORD_REALTIME_VOICE_CHANNEL_ID=<voice_channel_id>
+DISCORD_REALTIME_ALLOWED_USERS=<your_discord_user_id>
+OPENAI_REALTIME_API_KEY=<openai_platform_key>
+HERMES_REALTIME_AGENT_TOOLSETS=all
 ```
 
-Try:
-
-```text
-Hermes, tell me a long story about a fox and keep going until I stop you.
-```
-
-Interrupt with:
-
-```text
-Stop. Summarize it in one sentence.
-```
-
-Restart normal Hermes Discord afterwards:
+To make the bot leave voice cleanly:
 
 ```bash
-Ctrl+C
-systemctl --user start hermes-gateway
+hermes discord-realtime stop
 ```

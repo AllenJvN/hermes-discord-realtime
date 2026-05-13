@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Sandbox Discord voice proof-of-concept for OpenAI Realtime.
+"""Discord voice sidecar for Hermes Agent using OpenAI Realtime.
 
-This is intentionally isolated from the Hermes gateway:
-- no systemd changes
-- no slash command registration
-- no Hermes tools
-- one explicit guild/channel/user allowlist
-- manual run only
-
-Run with hermes-gateway stopped because Discord only allows one live bot
-client per token.
+The production-friendly path is a separate Discord voice bot token in
+DISCORD_REALTIME_BOT_TOKEN. That lets the normal hermes-gateway keep handling
+text, DMs, cron delivery, and slash commands while this sidecar owns only voice.
+Manual same-token experiments still work, but require stopping hermes-gateway.
 """
 
 from __future__ import annotations
@@ -21,6 +16,7 @@ import json
 import logging
 import os
 import signal
+import shutil
 import struct
 import subprocess
 import sys
@@ -37,6 +33,8 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from gateway.platforms.discord import VoiceReceiver
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
+SERVICE_NAME = "hermes-discord-realtime.service"
+VOICE_PERMISSIONS = 36768768
 DEFAULT_INSTRUCTIONS = (
     "You are Hermes speaking in a Discord voice channel through OpenAI Realtime. "
     "Keep normal conversation short and natural. "
@@ -985,62 +983,172 @@ def _pcm24_to_wav_file(pcm_24k_mono: bytes) -> str:
             pass
 
 
-def _load_args() -> argparse.Namespace:
+def _get_hermes_home() -> Path:
+    return Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+
+
+def _env_value(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name, "")
+        if value:
+            return value
+    return default
+
+
+def _parse_int(value: Any, *, name: str) -> int:
+    if isinstance(value, int):
+        return value
+    if value is None or str(value).strip() == "":
+        raise SystemExit(f"{name} is required")
+    try:
+        return int(str(value).strip())
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a Discord snowflake/integer, got {value!r}") from exc
+
+
+def _parse_user_ids(values: Any) -> list[int]:
+    raw: list[str] = []
+    if values:
+        raw.extend(str(v) for v in values)
+    env_value = _env_value("DISCORD_REALTIME_ALLOWED_USERS", "DISCORD_ALLOWED_USERS")
+    if env_value:
+        raw.extend(part.strip() for part in env_value.replace(";", ",").split(","))
+    user_ids: list[int] = []
+    for item in raw:
+        if not item:
+            continue
+        for part in str(item).replace(";", ",").split(","):
+            part = part.strip()
+            if part:
+                user_ids.append(_parse_int(part, name="allowed user id"))
+    seen: set[int] = set()
+    deduped: list[int] = []
+    for user_id in user_ids:
+        if user_id not in seen:
+            seen.add(user_id)
+            deduped.append(user_id)
+    if not deduped:
+        raise SystemExit(
+            "At least one allowed user is required. Set DISCORD_REALTIME_ALLOWED_USERS "
+            "or pass --allowed-user-id."
+        )
+    return deduped
+
+
+def _complete_runtime_args(args: argparse.Namespace) -> argparse.Namespace:
     load_hermes_dotenv()
-    parser = argparse.ArgumentParser(description="Hermes Discord/OpenAI Realtime voice bridge")
-    parser.add_argument("--guild-id", type=int, required=True)
-    parser.add_argument("--voice-channel-id", type=int, required=True)
-    parser.add_argument("--allowed-user-id", type=int, action="append", required=True)
-    parser.add_argument("--mode", choices=("turn", "duplex"), default="turn")
-    parser.add_argument("--model", default=os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"))
-    parser.add_argument("--voice", default=os.getenv("OPENAI_REALTIME_VOICE", "alloy"))
-    parser.add_argument("--instructions", default=os.getenv("OPENAI_REALTIME_INSTRUCTIONS", DEFAULT_INSTRUCTIONS))
-    parser.add_argument("--agent-toolsets", default=os.getenv("HERMES_REALTIME_AGENT_TOOLSETS", "all"))
-    parser.add_argument("--agent-timeout", type=float, default=float(os.getenv("HERMES_REALTIME_AGENT_TIMEOUT", "180")))
-    parser.add_argument("--response-timeout", type=float, default=30.0)
-    parser.add_argument("--playback-timeout", type=float, default=120.0)
-    parser.add_argument("--volume", type=float, default=1.0)
-    parser.add_argument("--vad-rms-threshold", type=int, default=650)
-    parser.add_argument("--vad-silence-seconds", type=float, default=0.75)
-    parser.add_argument("--vad-trailing-seconds", type=float, default=0.25)
-    parser.add_argument("--vad-min-seconds", type=float, default=0.25)
-    parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--openai-api-key", default=os.getenv("OPENAI_REALTIME_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""))
-    parser.add_argument("--discord-bot-token", default=os.getenv("DISCORD_BOT_TOKEN", ""))
-    args = parser.parse_args()
+    args.guild_id = _parse_int(
+        getattr(args, "guild_id", None) or _env_value("DISCORD_REALTIME_GUILD_ID"),
+        name="DISCORD_REALTIME_GUILD_ID/--guild-id",
+    )
+    args.voice_channel_id = _parse_int(
+        getattr(args, "voice_channel_id", None) or _env_value("DISCORD_REALTIME_VOICE_CHANNEL_ID"),
+        name="DISCORD_REALTIME_VOICE_CHANNEL_ID/--voice-channel-id",
+    )
+    args.allowed_user_id = _parse_user_ids(getattr(args, "allowed_user_id", None))
+    args.model = getattr(args, "model", None) or os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
+    args.voice = getattr(args, "voice", None) or os.getenv("OPENAI_REALTIME_VOICE", "alloy")
+    args.instructions = (
+        getattr(args, "instructions", None)
+        or os.getenv("OPENAI_REALTIME_INSTRUCTIONS")
+        or DEFAULT_INSTRUCTIONS
+    )
+    args.agent_toolsets = (
+        getattr(args, "agent_toolsets", None)
+        or os.getenv("HERMES_REALTIME_AGENT_TOOLSETS")
+        or "all"
+    )
+    args.agent_timeout = float(
+        getattr(args, "agent_timeout", None)
+        or os.getenv("HERMES_REALTIME_AGENT_TIMEOUT")
+        or 180.0
+    )
+    args.response_timeout = float(getattr(args, "response_timeout", None) or 30.0)
+    args.playback_timeout = float(getattr(args, "playback_timeout", None) or 120.0)
+    args.volume = float(getattr(args, "volume", None) or os.getenv("OPENAI_REALTIME_VOLUME") or 1.0)
+    args.vad_rms_threshold = int(
+        getattr(args, "vad_rms_threshold", None)
+        or os.getenv("OPENAI_REALTIME_VAD_RMS_THRESHOLD")
+        or 650
+    )
+    args.vad_silence_seconds = float(
+        getattr(args, "vad_silence_seconds", None)
+        or os.getenv("OPENAI_REALTIME_VAD_SILENCE_SECONDS")
+        or 0.75
+    )
+    args.vad_trailing_seconds = float(
+        getattr(args, "vad_trailing_seconds", None)
+        or os.getenv("OPENAI_REALTIME_VAD_TRAILING_SECONDS")
+        or 0.25
+    )
+    args.vad_min_seconds = float(
+        getattr(args, "vad_min_seconds", None)
+        or os.getenv("OPENAI_REALTIME_VAD_MIN_SECONDS")
+        or 0.25
+    )
+    args.log_level = getattr(args, "log_level", None) or os.getenv("OPENAI_REALTIME_LOG_LEVEL") or "INFO"
+    args.mode = getattr(args, "mode", None) or os.getenv("OPENAI_REALTIME_MODE") or "duplex"
+    args.openai_api_key = (
+        getattr(args, "openai_api_key", None)
+        or os.getenv("OPENAI_REALTIME_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    )
+    args.discord_bot_token = (
+        getattr(args, "discord_bot_token", None)
+        or os.getenv("DISCORD_REALTIME_BOT_TOKEN")
+        or os.getenv("DISCORD_BOT_TOKEN")
+        or ""
+    )
     if not args.openai_api_key:
-        parser.error("OPENAI_REALTIME_API_KEY or OPENAI_API_KEY is not set in the environment or ~/.hermes/.env")
+        raise SystemExit("OPENAI_REALTIME_API_KEY is not set in the environment or ~/.hermes/.env")
     if not args.discord_bot_token:
-        parser.error("DISCORD_BOT_TOKEN is not set in the environment or ~/.hermes/.env")
+        raise SystemExit(
+            "DISCORD_REALTIME_BOT_TOKEN is not set. For production, create a separate voice bot token. "
+            "For lab-only same-token mode, DISCORD_BOT_TOKEN may be used."
+        )
     return args
 
 
-async def _amain(args: argparse.Namespace | None = None) -> None:
-    args = args or _load_args()
+def _load_args() -> argparse.Namespace:
     load_hermes_dotenv()
-    if getattr(args, "model", None) is None:
-        args.model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
-    if getattr(args, "voice", None) is None:
-        args.voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
-    if getattr(args, "instructions", None) is None:
-        args.instructions = os.getenv("OPENAI_REALTIME_INSTRUCTIONS", DEFAULT_INSTRUCTIONS)
-    if getattr(args, "agent_toolsets", None) is None:
-        args.agent_toolsets = os.getenv("HERMES_REALTIME_AGENT_TOOLSETS", "all")
-    args.openai_api_key = os.getenv("OPENAI_REALTIME_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    args.discord_bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
-    if not args.openai_api_key:
-        raise SystemExit("OPENAI_REALTIME_API_KEY or OPENAI_API_KEY is not set")
-    if not args.discord_bot_token:
-        raise SystemExit("DISCORD_BOT_TOKEN is not set")
-    if not hasattr(args, "mode"):
-        args.mode = "duplex"
+    parser = argparse.ArgumentParser(description="Hermes Discord/OpenAI Realtime voice bridge")
+    parser.add_argument("--guild-id", type=int, default=None)
+    parser.add_argument("--voice-channel-id", type=int, default=None)
+    parser.add_argument("--allowed-user-id", type=int, action="append", default=None)
+    parser.add_argument("--mode", choices=("turn", "duplex"), default="duplex")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--voice", default=None)
+    parser.add_argument("--instructions", default=None)
+    parser.add_argument("--agent-toolsets", default=None)
+    parser.add_argument("--agent-timeout", type=float, default=None)
+    parser.add_argument("--response-timeout", type=float, default=30.0)
+    parser.add_argument("--playback-timeout", type=float, default=120.0)
+    parser.add_argument("--volume", type=float, default=None)
+    parser.add_argument("--vad-rms-threshold", type=int, default=None)
+    parser.add_argument("--vad-silence-seconds", type=float, default=None)
+    parser.add_argument("--vad-trailing-seconds", type=float, default=None)
+    parser.add_argument("--vad-min-seconds", type=float, default=None)
+    parser.add_argument("--log-level", default=None)
+    parser.add_argument("--openai-api-key", default=None)
+    parser.add_argument("--discord-bot-token", default=None)
+    return _complete_runtime_args(parser.parse_args())
+
+
+async def _amain(args: argparse.Namespace | None = None) -> None:
+    args = _complete_runtime_args(args) if args is not None else _load_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         force=True,
     )
     log = logging.getLogger("hermes.discord_realtime")
-    log.info("Starting Discord Realtime voice bridge. Stop hermes-gateway first when reusing the same bot token.")
+    if os.getenv("DISCORD_REALTIME_BOT_TOKEN"):
+        log.info("Starting Discord Realtime voice sidecar with DISCORD_REALTIME_BOT_TOKEN.")
+    else:
+        log.warning(
+            "Starting with DISCORD_BOT_TOKEN. Stop hermes-gateway first when reusing the same bot token."
+        )
     client = RealtimeDiscordSandbox(args, log)
 
     loop = asyncio.get_running_loop()
@@ -1063,10 +1171,288 @@ def main(args: argparse.Namespace | None = None) -> None:
 
 def print_env_status() -> None:
     load_hermes_dotenv()
-    for name in ("DISCORD_BOT_TOKEN", "OPENAI_REALTIME_API_KEY", "OPENAI_API_KEY"):
+    for name in (
+        "DISCORD_REALTIME_BOT_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "OPENAI_REALTIME_API_KEY",
+        "OPENAI_API_KEY",
+        "DISCORD_REALTIME_GUILD_ID",
+        "DISCORD_REALTIME_VOICE_CHANNEL_ID",
+        "DISCORD_REALTIME_ALLOWED_USERS",
+        "HERMES_REALTIME_AGENT_TOOLSETS",
+    ):
         value = os.getenv(name, "")
         prefix = value[:7] if value else ""
         print(f"{name}: set={bool(value)} len={len(value)} prefix={prefix}")
+
+
+def print_invite_url() -> None:
+    load_hermes_dotenv()
+    client_id = os.getenv("DISCORD_REALTIME_CLIENT_ID") or os.getenv("DISCORD_CLIENT_ID")
+    if not client_id:
+        token = os.getenv("DISCORD_REALTIME_BOT_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
+        if token and "." in token:
+            token_prefix = token.split(".", 1)[0]
+            try:
+                padded = token_prefix + ("=" * (-len(token_prefix) % 4))
+                decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii")
+                client_id = decoded if decoded.isdigit() else token_prefix
+            except Exception:
+                client_id = token_prefix
+    if not client_id:
+        print("Set DISCORD_REALTIME_CLIENT_ID, or provide a bot token whose first segment is the client ID.")
+        return
+    print(
+        "https://discord.com/oauth2/authorize?"
+        f"client_id={client_id}&permissions={VOICE_PERMISSIONS}"
+        "&integration_type=0&scope=bot+applications.commands"
+    )
+
+
+def print_setup() -> None:
+    print(
+        """
+Recommended production setup:
+
+1. Create a second Discord application/bot for voice, for example "Hermes Voice".
+2. Invite it with:
+
+   hermes discord-realtime invite-url
+
+3. Add these values to ~/.hermes/.env:
+
+   DISCORD_REALTIME_BOT_TOKEN=<voice_bot_token>
+   DISCORD_REALTIME_CLIENT_ID=<voice_bot_client_id>
+   DISCORD_REALTIME_GUILD_ID=<server_id>
+   DISCORD_REALTIME_VOICE_CHANNEL_ID=<voice_channel_id>
+   DISCORD_REALTIME_ALLOWED_USERS=<your_discord_user_id>
+   OPENAI_REALTIME_API_KEY=<openai_platform_key>
+   HERMES_REALTIME_AGENT_TOOLSETS=all
+
+4. Validate before running:
+
+   hermes discord-realtime doctor
+
+5. Install and start the sidecar:
+
+   hermes discord-realtime install-service
+   hermes discord-realtime start
+
+Normal hermes-gateway should remain running. Only stop hermes-gateway if you
+are doing a temporary same-token lab test with DISCORD_BOT_TOKEN.
+""".strip()
+    )
+
+
+async def _doctor_async() -> int:
+    load_hermes_dotenv()
+    failures = 0
+    warnings = 0
+
+    def ok(message: str) -> None:
+        print(f"[ok] {message}")
+
+    def warn(message: str) -> None:
+        nonlocal warnings
+        warnings += 1
+        print(f"[warn] {message}")
+
+    def fail(message: str) -> None:
+        nonlocal failures
+        failures += 1
+        print(f"[fail] {message}")
+
+    realtime_token = os.getenv("DISCORD_REALTIME_BOT_TOKEN", "")
+    normal_token = os.getenv("DISCORD_BOT_TOKEN", "")
+    token = realtime_token or normal_token
+    if realtime_token:
+        ok("DISCORD_REALTIME_BOT_TOKEN is set; normal hermes-gateway can keep running")
+    elif normal_token:
+        warn("Using DISCORD_BOT_TOKEN fallback; stop hermes-gateway before running voice")
+    else:
+        fail("DISCORD_REALTIME_BOT_TOKEN is not set")
+
+    openai_key = os.getenv("OPENAI_REALTIME_API_KEY", "")
+    if openai_key:
+        ok("OPENAI_REALTIME_API_KEY is set")
+    else:
+        fail("OPENAI_REALTIME_API_KEY is not set")
+
+    if shutil.which("ffmpeg"):
+        ok("ffmpeg is available")
+    else:
+        fail("ffmpeg is not available")
+
+    try:
+        import websockets  # noqa: F401
+
+        ok("websockets Python package is available")
+    except Exception as exc:
+        fail(f"websockets Python package is not importable: {exc}")
+
+    try:
+        import nacl  # noqa: F401
+
+        ok("PyNaCl is available for Discord voice")
+    except Exception as exc:
+        fail(f"PyNaCl is not importable: {exc}")
+
+    if not token:
+        print(f"doctor complete: failures={failures} warnings={warnings}")
+        return 1
+
+    try:
+        guild_id = _parse_int(os.getenv("DISCORD_REALTIME_GUILD_ID"), name="DISCORD_REALTIME_GUILD_ID")
+        voice_channel_id = _parse_int(
+            os.getenv("DISCORD_REALTIME_VOICE_CHANNEL_ID"),
+            name="DISCORD_REALTIME_VOICE_CHANNEL_ID",
+        )
+        allowed_users = _parse_user_ids(None)
+    except SystemExit as exc:
+        fail(str(exc))
+        print(f"doctor complete: failures={failures} warnings={warnings}")
+        return 1
+
+    ok(f"configured allowed user ids: {', '.join(str(u) for u in allowed_users)}")
+
+    class DoctorClient(discord.Client):
+        async def on_ready(self) -> None:
+            nonlocal failures
+            try:
+                print(f"[info] logged in as {self.user}")
+                guild = self.get_guild(guild_id)
+                if guild is None:
+                    fail(f"bot is not in guild {guild_id}, or guild is not visible")
+                    await self.close()
+                    return
+                ok(f"bot is in guild {guild.name} ({guild.id})")
+                me = guild.me or guild.get_member(self.user.id)  # type: ignore[union-attr]
+                voice = guild.get_channel(voice_channel_id)
+                if voice is None:
+                    try:
+                        voice = await self.fetch_channel(voice_channel_id)
+                    except Exception as exc:
+                        fail(f"cannot fetch voice channel {voice_channel_id}: {exc}")
+                        await self.close()
+                        return
+                if not isinstance(voice, (discord.VoiceChannel, discord.StageChannel)):
+                    fail(f"channel {voice_channel_id} is not a voice/stage channel")
+                else:
+                    perms = voice.permissions_for(me)
+                    required = {
+                        "view_channel": perms.view_channel,
+                        "connect": perms.connect,
+                        "speak": perms.speak,
+                        "use_voice_activation": perms.use_voice_activation,
+                    }
+                    for name, allowed in required.items():
+                        if allowed:
+                            ok(f"voice permission {name}=true")
+                        else:
+                            fail(f"voice permission {name}=false for {voice.name}")
+
+                home_channel = os.getenv("DISCORD_HOME_CHANNEL", "")
+                if home_channel and normal_token and (not realtime_token or realtime_token == normal_token):
+                    text = guild.get_channel(int(home_channel))
+                    if isinstance(text, discord.TextChannel):
+                        perms = text.permissions_for(me)
+                        if perms.view_channel and perms.send_messages and perms.read_message_history:
+                            ok(f"home text channel {text.name} is visible/sendable")
+                        else:
+                            warn(
+                                f"home text channel {text.name} lacks view/send/read for this bot; "
+                                "normal gateway may need its own bot/role permissions"
+                            )
+                await self.close()
+            except Exception as exc:
+                fail(f"Discord doctor failed: {exc}")
+                await self.close()
+
+    intents = discord.Intents.default()
+    intents.guilds = True
+    intents.voice_states = True
+    intents.members = True
+    await DoctorClient(intents=intents).start(token)
+    print(f"doctor complete: failures={failures} warnings={warnings}")
+    return 1 if failures else 0
+
+
+def doctor() -> None:
+    raise SystemExit(asyncio.run(_doctor_async()))
+
+
+def _service_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / SERVICE_NAME
+
+
+def _agent_dir() -> Path:
+    return Path(os.getenv("HERMES_AGENT_DIR") or _get_hermes_home() / "hermes-agent").expanduser()
+
+
+def _service_unit() -> str:
+    agent_dir = _agent_dir()
+    python = agent_dir / "venv" / "bin" / "python"
+    hermes_home = _get_hermes_home()
+    user_local_bin = Path.home() / ".local" / "bin"
+    return f"""[Unit]
+Description=Hermes Discord Realtime Voice Sidecar
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={agent_dir}
+Environment=HERMES_HOME={hermes_home}
+Environment=PATH={agent_dir}/venv/bin:{hermes_home}/node/bin:{user_local_bin}:/usr/local/bin:/usr/bin:/bin
+ExecStart={python} -m hermes_cli.main discord-realtime run
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def install_service() -> None:
+    service_path = _service_path()
+    service_path.parent.mkdir(parents=True, exist_ok=True)
+    service_path.write_text(_service_unit(), encoding="utf-8")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "--user", "enable", SERVICE_NAME], check=False)
+    print(f"Installed {SERVICE_NAME} at {service_path}")
+    print("Run: hermes discord-realtime doctor && hermes discord-realtime start")
+
+
+def uninstall_service() -> None:
+    service_command("stop", check=False)
+    subprocess.run(["systemctl", "--user", "disable", SERVICE_NAME], check=False)
+    service_path = _service_path()
+    if service_path.exists():
+        service_path.unlink()
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    print(f"Removed {SERVICE_NAME}")
+
+
+def service_command(command: str, *, check: bool = False) -> None:
+    if command == "status":
+        subprocess.run(["systemctl", "--user", "status", SERVICE_NAME, "--no-pager", "-l"], check=False)
+        return
+    subprocess.run(["systemctl", "--user", command, SERVICE_NAME], check=check)
+    if command in {"start", "restart"}:
+        subprocess.run(["systemctl", "--user", "status", SERVICE_NAME, "--no-pager", "-l"], check=False)
+
+
+def service_logs(*, lines: int, follow: bool) -> None:
+    cmd = ["journalctl", "--user", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-l"]
+    if follow:
+        cmd.remove("--no-pager")
+        cmd.append("-f")
+    subprocess.run(cmd, check=False)
 
 
 if __name__ == "__main__":

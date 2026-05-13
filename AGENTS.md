@@ -17,6 +17,8 @@ Development rules:
 - Never commit `.env`, Discord tokens, OpenAI keys, Home Assistant tokens, or
   voice recordings.
 
-The current bridge reuses the existing Hermes Discord bot token, so
-`hermes-gateway` must be stopped while running it. A separate Discord bot token
-is the preferred next step for production.
+Production v1 is a separate voice sidecar bot using
+`DISCORD_REALTIME_BOT_TOKEN`. The normal `hermes-gateway` should stay running
+with `DISCORD_BOT_TOKEN` for text, DMs, home channels, cron, and slash
+commands. Same-token mode is only for temporary lab testing and requires
+stopping `hermes-gateway`.
