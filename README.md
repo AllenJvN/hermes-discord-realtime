@@ -29,9 +29,13 @@ Required `~/.hermes/.env` values:
 DISCORD_BOT_TOKEN=<existing_hermes_bot_token>
 DISCORD_ALLOWED_USERS=<your_discord_user_id>
 DISCORD_HOME_CHANNEL=<hermes_home_text_channel_id>
-OPENAI_REALTIME_API_KEY=<openai_platform_key>
 HERMES_REALTIME_AGENT_TOOLSETS=all
 ```
+
+For OpenAI Realtime, the plugin uses `OPENAI_REALTIME_API_KEY` when set. If it
+is not set, it reuses `OPENAI_API_KEY` when that value looks like an OpenAI
+Platform key. Hermes `openai-codex` OAuth login is not enough by itself because
+Realtime uses OpenAI Platform API authentication.
 
 If Discord's slash picker is stale after install, type `/realtime doctor` as a
 normal text message. The gateway hook handles both native slash commands and
@@ -123,7 +127,7 @@ HERMES_REALTIME_AGENT_TOOLSETS=homeassistant,device_worker,device_coding
 ## Troubleshooting
 
 - `/realtime` is unknown: restart `hermes-gateway`; if the slash picker is stale, type `/realtime doctor` as plain text.
-- `OPENAI_REALTIME_API_KEY is not set`: add it to `~/.hermes/.env` and restart the gateway.
+- `Set OPENAI_REALTIME_API_KEY or a valid OpenAI Platform OPENAI_API_KEY`: add one of those keys to `~/.hermes/.env` and restart the gateway.
 - `Join a Discord voice channel first`: join voice before running `/realtime join`.
 - `403 Missing Access`: fix text or voice channel permissions for the bot role.
 - You speak but nothing happens: confirm your Discord user ID is in `DISCORD_ALLOWED_USERS`.

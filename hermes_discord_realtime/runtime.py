@@ -508,6 +508,29 @@ def _ask_hermes_agent(
     return {"ok": True, "request": request, "response": stdout[-4000:]}
 
 
+def _looks_like_openai_platform_key(value: str) -> bool:
+    key = (value or "").strip()
+    return key.startswith(("sk-", "sk-proj-", "sk-svcacct-")) and len(key) > 20
+
+
+def _resolve_openai_realtime_api_key() -> tuple[str, str]:
+    """Resolve a Platform API key usable with OpenAI Realtime.
+
+    Hermes' `openai-codex` auth is a ChatGPT/Codex OAuth credential, not an
+    OpenAI Platform API key. Realtime expects Platform Bearer auth, so only
+    explicit Platform-looking env vars are accepted here.
+    """
+    realtime_key = os.getenv("OPENAI_REALTIME_API_KEY", "").strip()
+    if realtime_key:
+        return realtime_key, "OPENAI_REALTIME_API_KEY"
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if _looks_like_openai_platform_key(openai_key):
+        return openai_key, "OPENAI_API_KEY"
+
+    return "", ""
+
+
 def _env_value(*names: str, default: str = "") -> str:
     for name in names:
         value = os.getenv(name, "")

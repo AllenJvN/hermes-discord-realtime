@@ -6,4 +6,3 @@ platforms:
   - linux
 requires_env:
   - DISCORD_BOT_TOKEN
-  - OPENAI_REALTIME_API_KEY

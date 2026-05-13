@@ -26,6 +26,7 @@ from .runtime import (
     RealtimeDuplexSession,
     StreamingPCMAudioSource,
     _downsample_48k_stereo_to_24k_mono,
+    _resolve_openai_realtime_api_key,
     _parse_user_ids,
     _pcm_rms,
 )
@@ -210,10 +211,11 @@ async def _doctor(event, adapter) -> str:
     user_id = str(event.source.user_id)
     voice_channel = await adapter.get_user_voice_channel(guild_id, user_id)
     lines: list[str] = []
-    if os.getenv("OPENAI_REALTIME_API_KEY"):
-        lines.append("[ok] OPENAI_REALTIME_API_KEY is set")
+    api_key, api_key_source = _resolve_openai_realtime_api_key()
+    if api_key:
+        lines.append(f"[ok] OpenAI Realtime API key resolved from {api_key_source}")
     else:
-        lines.append("[fail] OPENAI_REALTIME_API_KEY is not set")
+        lines.append("[fail] Set OPENAI_REALTIME_API_KEY or a valid OpenAI Platform OPENAI_API_KEY")
     if voice_channel:
         lines.append(f"[ok] caller is in voice channel {voice_channel.name}")
         me = voice_channel.guild.me
@@ -260,9 +262,10 @@ def _allowed_user_ids(adapter) -> set[str]:
 
 
 def _gateway_realtime_args() -> argparse.Namespace:
-    api_key = os.getenv("OPENAI_REALTIME_API_KEY") or ""
+    api_key, api_key_source = _resolve_openai_realtime_api_key()
     if not api_key:
-        raise RuntimeError("OPENAI_REALTIME_API_KEY is not set")
+        raise RuntimeError("Set OPENAI_REALTIME_API_KEY or a valid OpenAI Platform OPENAI_API_KEY")
+    log.info("Using OpenAI Realtime API key from %s", api_key_source)
     return argparse.Namespace(
         openai_api_key=api_key,
         model=os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
