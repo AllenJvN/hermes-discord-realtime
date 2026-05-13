@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Runtime helpers for the Hermes Discord Realtime gateway plugin.
 
 This module deliberately contains no Discord client. Hermes owns Discord through
